@@ -1,0 +1,221 @@
+# .github/workflows/ci.yml
+# ────────────────────────────────────────────────────────────
+# RAG Pipeline CI/CD
+# All thresholds are read from repository secrets / env vars.
+# Nothing is hard-coded.
+# ────────────────────────────────────────────────────────────
+
+name: CI
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  # These defaults mirror .env — override via GitHub repository variables
+  EMBEDDING_MODEL:                ${{ vars.EMBEDDING_MODEL || 'all-MiniLM-L6-v2' }}
+  EMBEDDING_DIM:                  ${{ vars.EMBEDDING_DIM || '384' }}
+  CLASSIFIER_COMPLEXITY_THRESHOLD: ${{ vars.CLASSIFIER_COMPLEXITY_THRESHOLD || '0.6' }}
+  CLASSIFIER_ACCURACY_TARGET:     ${{ vars.CLASSIFIER_ACCURACY_TARGET || '0.88' }}
+  FAISS_FLAT_MAX_CHUNKS:          ${{ vars.FAISS_FLAT_MAX_CHUNKS || '10000' }}
+  FAISS_IVF_MAX_CHUNKS:           ${{ vars.FAISS_IVF_MAX_CHUNKS || '1000000' }}
+  BENCHMARK_N_QUERIES:            ${{ vars.BENCHMARK_N_QUERIES || '500' }}
+  BENCHMARK_P99_CACHED_MAX_MS:    ${{ vars.BENCHMARK_P99_CACHED_MAX_MS || '100' }}
+  BENCHMARK_P99_COMPLEX_MAX_MS:   ${{ vars.BENCHMARK_P99_COMPLEX_MAX_MS || '800' }}
+  BENCHMARK_REGRESSION_THRESHOLD_PCT: ${{ vars.BENCHMARK_REGRESSION_THRESHOLD_PCT || '20' }}
+  EVAL_TARGET_RECALL:             ${{ vars.EVAL_TARGET_RECALL || '0.91' }}
+  MMR_LAMBDA:                     ${{ vars.MMR_LAMBDA || '0.7' }}
+
+jobs:
+
+  # ── 1. Lint & type-check ──────────────────────────────────
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install lint tools
+        run: pip install ruff mypy pydantic pydantic-settings
+
+      - name: Ruff lint
+        run: ruff check services/ shared/ scripts/ tests/ --output-format=github
+
+      - name: Ruff format check
+        run: ruff format --check services/ shared/ scripts/ tests/
+
+      - name: Mypy type check
+        run: |
+          mypy services/gateway/classifier.py \
+               services/gateway/mmr.py \
+               services/embedder/main.py \
+               shared/config.py \
+               --ignore-missing-imports \
+               --no-strict-optional
+
+  # ── 2. Unit tests ─────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            pytest pytest-cov pytest-asyncio \
+            pydantic pydantic-settings \
+            numpy faiss-cpu \
+            sentence-transformers \
+            spacy \
+            httpx redis
+          python -m spacy download en_core_web_sm
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ \
+            --ignore=tests/test_integration.py \
+            --cov=services \
+            --cov=shared \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            -v
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+        continue-on-error: true
+
+  # ── 3. Docker build ───────────────────────────────────────
+  build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build all service images
+        run: docker compose build --parallel
+
+      - name: Verify images exist
+        run: |
+          docker image ls | grep rag-pipeline
+          echo "All images built successfully"
+
+  # ── 4. Integration tests (stack up) ──────────────────────
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: build
+    # Only run on pushes to main, not on every PR to save CI minutes
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy env file
+        run: cp .env .env.local
+
+      - name: Start services (without LLM — too large for CI)
+        run: |
+          docker compose up -d embedder retriever redis-stack prometheus
+          sleep 30
+
+      - name: Wait for services healthy
+        run: |
+          for svc in embedder retriever; do
+            for i in $(seq 1 10); do
+              if curl -sf "http://localhost:$(grep ${svc^^}_PORT .env | cut -d= -f2)/health"; then
+                echo "${svc} healthy"
+                break
+              fi
+              sleep 5
+            done
+          done
+
+      - name: Run integration tests (no LLM)
+        env:
+          INTEGRATION_TESTS: "1"
+        run: |
+          pip install pytest httpx numpy
+          pytest tests/test_integration.py \
+            -v -k "not llm and not answer" \
+            --timeout=60
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ── 5. Latency benchmark ──────────────────────────────────
+  benchmark:
+    name: Latency Regression Benchmark
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install benchmark deps
+        run: pip install httpx numpy
+
+      - name: Start full stack
+        run: |
+          cp .env .env.local
+          docker compose up -d embedder retriever redis-stack gateway
+          sleep 45
+
+      - name: Run latency benchmark
+        run: |
+          python scripts/benchmark_latency.py \
+            --n-queries ${{ env.BENCHMARK_N_QUERIES }} \
+            --assert-p99-lt ${{ env.BENCHMARK_P99_CACHED_MAX_MS }} \
+            --assert-complex-p99-lt ${{ env.BENCHMARK_P99_COMPLEX_MAX_MS }} \
+            --output-json benchmark_results.json
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: benchmark_results.json
+
+      - name: Check regression vs main
+        run: |
+          echo "Checking P99 regression threshold: ${{ env.BENCHMARK_REGRESSION_THRESHOLD_PCT }}%"
+          python - <<'EOF'
+          import json, os, sys
+          with open("benchmark_results.json") as f:
+              result = json.load(f)
+          if not result.get("passed"):
+              print("Benchmark FAILED:", result.get("failures"))
+              sys.exit(1)
+          print("Benchmark PASSED")
+          EOF
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

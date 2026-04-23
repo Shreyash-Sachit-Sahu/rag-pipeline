@@ -1,0 +1,22 @@
+[
+  {
+    "question": "What is FAISS and who developed it?",
+    "relevant_chunk_ids": []
+  },
+  {
+    "question": "How does semantic caching reduce LLM inference load?",
+    "relevant_chunk_ids": []
+  },
+  {
+    "question": "What is the difference between IndexFlatIP and IndexIVFFlat?",
+    "relevant_chunk_ids": []
+  },
+  {
+    "question": "Explain multi-hop retrieval and its recall improvements.",
+    "relevant_chunk_ids": []
+  },
+  {
+    "question": "What is Maximal Marginal Relevance and how does it improve RAG?",
+    "relevant_chunk_ids": []
+  }
+]

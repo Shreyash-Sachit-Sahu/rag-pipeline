@@ -1,0 +1,214 @@
+version: "3.9"
+
+# ────────────────────────────────────────────────────────────
+# RAG Pipeline — Docker Compose
+# All service configuration comes from .env (no hard-coded values).
+# Bring everything up: docker compose up --build
+# ────────────────────────────────────────────────────────────
+
+x-common: &common
+  env_file: .env
+  restart: unless-stopped
+  networks:
+    - internal
+
+networks:
+  internal:
+    driver: bridge
+  external:
+    driver: bridge
+
+volumes:
+  data_volume:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+services:
+
+  # ── Embedding service ──────────────────────────────────────
+  embedder:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: embedder
+    ports:
+      - "${EMBEDDER_PORT:-8001}:${EMBEDDER_PORT:-8001}"
+    volumes:
+      - data_volume:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${EMBEDDER_PORT:-8001}/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s   # model download + load on first run can take ~30-60s
+
+  # ── Retrieval engine ──────────────────────────────────────
+  retriever:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: retriever
+    depends_on:
+      embedder:
+        condition: service_healthy
+    ports:
+      - "${RETRIEVER_PORT:-8002}:${RETRIEVER_PORT:-8002}"
+    volumes:
+      - data_volume:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${RETRIEVER_PORT:-8002}/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Redis Stack (semantic cache) ──────────────────────────
+  redis-stack:
+    image: redis/redis-stack:latest
+    <<: *common
+    ports:
+      - "${CACHE_PORT:-6379}:6379"
+      - "8008:8001"   # RedisInsight UI (optional)
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Local LLM runner (llama.cpp) ──────────────────────────
+  llm:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: llm
+    ports:
+      - "${LLM_PORT:-8080}:${LLM_PORT:-8080}"
+    volumes:
+      - data_volume:/app/data
+      - ./models:/app/models:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 16G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${LLM_PORT:-8080}/health"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+
+  # ── Query gateway (entry point) ───────────────────────────
+  gateway:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: gateway
+    depends_on:
+      embedder:
+        condition: service_healthy
+      retriever:
+        condition: service_healthy
+      redis-stack:
+        condition: service_healthy
+    ports:
+      - "${GATEWAY_PORT:-8000}:${GATEWAY_PORT:-8000}"
+    networks:
+      - internal
+      - external
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${GATEWAY_PORT:-8000}/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Web Scraper ───────────────────────────────────────────
+  scraper:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: scraper
+    depends_on:
+      embedder:
+        condition: service_healthy
+    ports:
+      - "${SCRAPER_PORT:-8003}:${SCRAPER_PORT:-8003}"
+    volumes:
+      - data_volume:/app/data
+    environment:
+      # Inline override so scraper can call ingestion in-process
+      INGEST_URL: ""
+      FAISS_INDEX_PATH: /app/data/index.faiss
+      SQLITE_PATH: /app/data/index_meta.sqlite
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${SCRAPER_PORT:-8003}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - scrape   # docker compose --profile scrape up scraper
+
+  # ── Ingestion (one-shot job) ───────────────────────────────
+  ingestion:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ingestion
+    depends_on:
+      embedder:
+        condition: service_healthy
+    volumes:
+      - data_volume:/app/data
+    profiles:
+      - ingest   # only runs with: docker compose --profile ingest up ingestion
+
+  # ── Prometheus ────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    <<: *common
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Grafana ───────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    <<: *common
+    depends_on:
+      - prometheus
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

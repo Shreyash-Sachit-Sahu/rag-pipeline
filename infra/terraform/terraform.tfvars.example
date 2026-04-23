@@ -1,0 +1,35 @@
+# infra/terraform/terraform.tfvars.example
+# Copy to terraform.tfvars and fill in your values.
+# All values map to variables in main.tf — nothing is hard-coded there.
+
+aws_region   = "us-east-1"
+project_name = "rag-pipeline"
+environment  = "production"
+
+# Your ECR registry (get from: aws ecr describe-repositories)
+ecr_registry = "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+
+# Image tags — set to specific SHA or "latest"
+gateway_image_tag   = "latest"
+embedder_image_tag  = "latest"
+retriever_image_tag = "latest"
+llm_image_tag       = "latest"
+
+# ECS resource allocations (PRD §6.4)
+gateway_cpu    = 1024    # 1 vCPU
+gateway_memory = 2048    # 2 GB
+llm_cpu        = 4096    # 4 vCPU
+llm_memory     = 16384   # 16 GB
+embedder_cpu   = 1024
+embedder_memory= 2048
+retriever_cpu  = 512
+retriever_memory = 1024
+
+# Redis (use ElastiCache in same VPC for sub-1ms cache access)
+redis_node_type = "cache.t3.medium"
+
+# CloudWatch alarm threshold (ms)
+alert_p99_ms = 150
+
+# VPC CIDR
+vpc_cidr = "10.0.0.0/16"

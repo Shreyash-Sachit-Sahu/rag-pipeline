@@ -1,0 +1,62 @@
+# monitoring/alerts.yml
+# Alerting rules for the RAG pipeline.
+# Thresholds reference the env-configured targets from PRD §6.1.
+# In production (AWS ECS) CloudWatch alarms mirror these thresholds.
+
+groups:
+  - name: rag_latency
+    rules:
+
+      - alert: HighP99Latency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(rag_query_latency_seconds_bucket{route!="cache_hit"}[5m])) by (le, route)
+          ) > 0.8
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P99 query latency > 800ms on route {{ $labels.route }}"
+          description: |
+            P99 latency for route {{ $labels.route }} is
+            {{ $value | humanizeDuration }} — above the 800ms threshold.
+
+      - alert: CriticalP99Latency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(rag_query_latency_seconds_bucket{route="cache_hit"}[5m])) by (le)
+          ) > 0.1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Cache-hit P99 latency > 100ms"
+          description: "Cache-hit P99 is {{ $value | humanizeDuration }}. Redis may be overloaded."
+
+  - name: rag_cache
+    rules:
+
+      - alert: LowCacheHitRate
+        expr: |
+          rate(rag_cache_hit_total{result="hit"}[10m])
+          /
+          (rate(rag_cache_hit_total{result="hit"}[10m]) + rate(rag_cache_hit_total{result="miss"}[10m]))
+          < 0.20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cache hit rate below 20%"
+          description: "Current hit rate: {{ $value | humanizePercentage }}. Target is >35%."
+
+  - name: rag_availability
+    rules:
+
+      - alert: ServiceDown
+        expr: up{job=~"rag_.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RAG service {{ $labels.job }} is down"
+          description: "Scrape target {{ $labels.instance }} has been unreachable for 1 minute."

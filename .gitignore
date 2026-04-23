@@ -1,0 +1,46 @@
+# Models (too large for git — use download_model.sh)
+models/
+*.gguf
+*.bin
+
+# FAISS index and SQLite metadata (generated at ingest time)
+data/index.faiss
+data/index_meta.sqlite
+data/raw/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Environment overrides
+.env.local
+.env.*.local
+*.tfvars
+!infra/terraform/terraform.tfvars.example
+
+# Terraform state
+infra/terraform/.terraform/
+infra/terraform/terraform.tfstate
+infra/terraform/terraform.tfstate.backup
+infra/terraform/.terraform.lock.hcl
+
+# Docker build artefacts
+.docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Benchmark outputs
+benchmark_results.json
+recall_results.json

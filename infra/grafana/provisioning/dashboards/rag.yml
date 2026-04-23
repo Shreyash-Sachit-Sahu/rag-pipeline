@@ -1,0 +1,13 @@
+# infra/grafana/provisioning/dashboards/rag.yml
+apiVersion: 1
+
+providers:
+  - name: RAG Pipeline
+    orgId: 1
+    folder: RAG
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
