@@ -24,7 +24,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
+from prometheus_client import Counter, Gauge, Histogram, make_asgi_app,CollectorRegistry
 from pydantic import BaseModel, Field
 
 import sys
@@ -42,6 +42,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 settings = get_gateway_settings()
+registry = CollectorRegistry()
 
 # ── Prometheus metrics (PRD §6.1) ────────────────────────────
 query_latency = Histogram(
@@ -49,15 +50,18 @@ query_latency = Histogram(
     "End-to-end query latency in seconds",
     labelnames=["route"],
     buckets=[0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5],
+    registry=registry,
 )
 cache_hit_counter = Counter(
     "rag_cache_hit_total",
     "Semantic cache hit/miss counter",
     labelnames=["result"],
+    registry=registry,
 )
 llm_tokens_per_second = Gauge(
     "rag_llm_tokens_per_second",
     "LLM inference throughput (tokens/second)",
+    registry=registry,
 )
 
 # ── Global service clients ────────────────────────────────────
