@@ -97,7 +97,8 @@ RUN git clone --depth 1 https://github.com/ggerganov/llama.cpp /opt/llama.cpp &&
 
 FROM python:3.11-slim AS llm
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+RUN apt-get update && apt-get install -y --no-install-recommends \  
+    curl libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Only copy the single static binary — no shared libs needed
