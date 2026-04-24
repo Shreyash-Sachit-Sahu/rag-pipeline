@@ -27,6 +27,7 @@ import httpx
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from prometheus_fastapi_instrumentator import Instrumentator
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../"))
 from shared.config import get_scraper_settings
@@ -76,7 +77,7 @@ app = FastAPI(
     description="Crawl websites and feed content into the RAG ingestion pipeline.",
     lifespan=lifespan,
 )
-
+Instrumentator().instrument(app).expose(app)
 
 # ── Schemas ───────────────────────────────────────────────────
 
